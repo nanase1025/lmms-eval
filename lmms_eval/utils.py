@@ -690,7 +690,15 @@ def make_table(result_dict, column: str = "results", sort_results: bool = False)
     if column == "results":
         throughput = result_dict.get("throughput", {})
         if isinstance(throughput, dict) and throughput:
-            preferred_order = ["total_gen_tokens", "total_elapsed_time", "avg_latency", "avg_speed"]
+            preferred_order = [
+                "total_gen_tokens",
+                "total_elapsed_time",
+                "avg_latency",
+                "avg_speed",
+                "avg_prefill_time_ms",
+                "avg_decode_time_ms",
+                "avg_peak_memory_gb",
+            ]
             ordered_keys = preferred_order + sorted([k for k in throughput.keys() if k not in preferred_order])
 
             def get_unit(metric_name: str) -> str:
@@ -702,6 +710,10 @@ def make_table(result_dict, column: str = "results", sort_results: bool = False)
                     return "seconds/request"
                 if metric_name == "avg_speed":
                     return "tokens/s"
+                if metric_name in {"avg_prefill_time_ms", "avg_decode_time_ms"}:
+                    return "ms"
+                if metric_name == "avg_peak_memory_gb":
+                    return "GB"
                 return "varies"
 
             throughput_summary = MarkdownTableWriter()

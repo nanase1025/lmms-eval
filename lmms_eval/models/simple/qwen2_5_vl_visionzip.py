@@ -11,9 +11,10 @@ from PIL import Image
 from tqdm import tqdm
 from transformers import (
     AutoProcessor,
-    AutoTokenizer,
-    Qwen2_5_VLForConditionalGeneration,
+    AutoTokenizer
 )
+from lmms_eval.models.simple.modelling_qwen2_5vl_visionzip import Qwen2_5_VLForConditionalGeneration
+
 
 from lmms_eval import utils
 from lmms_eval.api.instance import GenerationResult, Instance, TokenCounts
@@ -29,8 +30,8 @@ if not _has_qwen_vl:
     eval_logger.warning("Failed to import qwen_vl_utils; Please install it via `pip install qwen-vl-utils`")
 
 
-@register_model("qwen2_5_vl")
-class Qwen2_5_VL(lmms):
+@register_model("qwen2_5_vl_visionzip")
+class Qwen2_5_VL_VisionZip(lmms):
     """
     Qwen2.5_VL Model
     "https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct"
@@ -51,6 +52,11 @@ class Qwen2_5_VL(lmms):
         system_prompt: Optional[str] = "You are a helpful assistant.",
         interleave_visuals: Optional[bool] = False,
         reasoning_prompt: Optional[str] = None,
+        visionzip_dominant_ratio: float = 0.30,
+        visionzip_contextual_ratio: float = 0.03,
+        dominant_ratio: Optional[float] = None,
+        demainant_ratio: Optional[float] = None,
+        contextual_ratio: Optional[float] = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -83,6 +89,22 @@ class Qwen2_5_VL(lmms):
 
         self._model = Qwen2_5_VLForConditionalGeneration.from_pretrained(pretrained, **model_kwargs).eval()
         patch_hf_qwen2_5_vl_latency_measurement(self._model)
+        if dominant_ratio is not None:
+            visionzip_dominant_ratio = dominant_ratio
+        if demainant_ratio is not None:
+            visionzip_dominant_ratio = demainant_ratio
+        if contextual_ratio is not None:
+            visionzip_contextual_ratio = contextual_ratio
+
+        self.visionzip_dominant_ratio = float(visionzip_dominant_ratio)
+        self.visionzip_contextual_ratio = float(visionzip_contextual_ratio)
+        self._model.visionzip_dominant_ratio = self.visionzip_dominant_ratio
+        self._model.visionzip_contextual_ratio = self.visionzip_contextual_ratio
+
+        eval_logger.info(
+            f"Using VisionZip ratios dominant={self.visionzip_dominant_ratio:.4f}, "
+            f"contextual={self.visionzip_contextual_ratio:.4f}"
+        )
         self.max_pixels = max_pixels
         self.min_pixels = min_pixels
         self.max_num_frames = max_num_frames
@@ -183,7 +205,7 @@ class Qwen2_5_VL(lmms):
     def generate_until(self, requests: List[Instance]) -> List[GenerationResult]:
         res = []
         total_elapsed_time = 0.0
-        total_gen_tokens = 0
+        total_tokens = 0
         total_prefill_time_ms = 0.0
         total_decode_time_ms = 0.0
         total_peak_memory_gb = 0.0
@@ -362,9 +384,10 @@ class Qwen2_5_VL(lmms):
                     use_cache=self.use_cache,
                 )
                 end_time = time.time()
+
                 generated_ids_trimmed = [out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, cont)]
                 total_elapsed_time += end_time - start_time
-                total_gen_tokens += sum(len(ids) for ids in generated_ids_trimmed)
+                total_tokens += sum(len(ids) for ids in generated_ids_trimmed)
                 total_prefill_time_ms += float(getattr(measured_model, "prefill_latency", 0.0))
                 total_decode_time_ms += float(getattr(measured_model, "decode_latency", 0.0))
                 if self.device.type == "cuda" and torch.cuda.is_available():
@@ -392,9 +415,8 @@ class Qwen2_5_VL(lmms):
                         ans = ans.split(term)[0]
                 answers[i] = ans
 
-            for idx, (ans, context) in enumerate(zip(answers, contexts)):
-                token_counts = TokenCounts(output_tokens=len(generated_ids_trimmed[idx]))
-                res.append(GenerationResult(text=ans, token_counts=token_counts))
+            for i, (ans, context) in enumerate(zip(answers, contexts)):
+                res.append(GenerationResult(text=ans, token_counts=TokenCounts(output_tokens=len(generated_ids_trimmed[i]))))
                 self.cache_hook.add_partial("generate_until", (context, gen_kwargs), ans)
                 pbar.update(1)
 
@@ -403,18 +425,14 @@ class Qwen2_5_VL(lmms):
             # reorder this group of results back to original unsorted form
         res = re_ords.get_original(res)
 
-        avg_prefill_time_ms = (total_prefill_time_ms / request_count) if request_count > 0 else 0.0
-        avg_decode_time_ms = (total_decode_time_ms / request_count) if request_count > 0 else 0.0
-        avg_peak_memory_gb = (total_peak_memory_gb / request_count) if request_count > 0 else 0.0
-        avg_speed = (total_gen_tokens / total_elapsed_time) if total_elapsed_time > 0 else 0.0
         log_metrics(
             total_elapsed_time=total_elapsed_time,
-            total_gen_tokens=total_gen_tokens,
-            avg_speed=avg_speed,
+            total_gen_tokens=total_tokens,
+            avg_speed=(total_tokens / total_elapsed_time) if total_elapsed_time > 0 else 0,
             additional_metrics={
-                "prefill_time_ms": avg_prefill_time_ms,
-                "decode_time_ms": avg_decode_time_ms,
-                "peak_memory_gb": avg_peak_memory_gb,
+                "prefill_time_ms": (total_prefill_time_ms / request_count) if request_count > 0 else 0.0,
+                "decode_time_ms": (total_decode_time_ms / request_count) if request_count > 0 else 0.0,
+                "peak_memory_gb": (total_peak_memory_gb / request_count) if request_count > 0 else 0.0,
                 "rank": self.rank,
                 "total_requests": request_count,
             },
